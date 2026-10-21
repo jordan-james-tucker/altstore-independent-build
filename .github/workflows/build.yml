@@ -23,11 +23,12 @@ jobs:
       SOURCE_COMMIT: 31972b5eb79a9df5badf25a0c073a033c7770db4
       ALTSIGN_COMMIT: 020ddb5691ffb9b75dfdd92b83a6809bbfdd1d5b
       IDEVICE_COMMIT: ad4a0eaa0f04f96616aa00214a13981c042d36f4
-      OUT: ${{ runner.temp }}/altstore-build-output
     steps:
       - name: Record the build environment
         run: |
           set -euo pipefail
+          export OUT="$RUNNER_TEMP/altstore-build-output"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
           mkdir -p "$OUT"
           {
             xcodebuild -version
