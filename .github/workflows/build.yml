@@ -47,14 +47,17 @@ jobs:
           git -C source fetch --depth 1 origin "$SOURCE_COMMIT"
           git -C source checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
-          git -C source submodule update --init --recursive --jobs 4 -- \
-            Dependencies/AltSign Dependencies/Roxas \
-            Dependencies/MarkdownAttributedString Dependencies/idevice
+          git -C source submodule update --init --recursive --jobs 4
           test "$(git -C source/Dependencies/AltSign rev-parse HEAD)" = "$ALTSIGN_COMMIT"
           test "$(git -C source/Dependencies/idevice rev-parse HEAD)" = "$IDEVICE_COMMIT"
           test -f source/Dependencies/idevice/swift/Package.swift
+          test -f source/Dependencies/libplist/src/Uid.cpp
           cmp source/Podfile.lock source/Pods/Manifest.lock
           git -C source submodule status --recursive > "$OUT/submodules.txt"
+          if grep -q '^[-+U]' "$OUT/submodules.txt"; then
+            echo 'A submodule is missing or differs from its pinned revision.' >&2
+            exit 1
+          fi
           git -C source status --porcelain > "$OUT/source-status-before-build.txt"
           test ! -s "$OUT/source-status-before-build.txt"
           cp source/Podfile.lock "$OUT/Podfile.lock"
