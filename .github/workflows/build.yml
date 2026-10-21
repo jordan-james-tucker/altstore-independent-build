@@ -1,0 +1,138 @@
+name: Build reviewed AltStore source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: altstore-independent-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Standard runners are free for public repositories. Never run in a private copy.
+    if: github.event.repository.private == false
+    runs-on: xcode-27
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_COMMIT: 31972b5eb79a9df5badf25a0c073a033c7770db4
+      ALTSIGN_COMMIT: 020ddb5691ffb9b75dfdd92b83a6809bbfdd1d5b
+      IDEVICE_COMMIT: ad4a0eaa0f04f96616aa00214a13981c042d36f4
+      OUT: ${{ runner.temp }}/altstore-build-output
+    steps:
+      - name: Record the build environment
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          {
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+            sw_vers
+            git --version
+          } | tee "$OUT/build-environment.txt"
+          sdk_major="$(xcrun --sdk iphoneos --show-sdk-version | cut -d. -f1)"
+          test "$sdk_major" -ge 27
+
+      - name: Fetch the exact reviewed source and pinned dependencies
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source remote add origin https://github.com/liuzhe1117/AltStore.git
+          git -C source fetch --depth 1 origin "$SOURCE_COMMIT"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git -C source submodule update --init --recursive --jobs 4 -- \
+            Dependencies/AltSign Dependencies/Roxas \
+            Dependencies/MarkdownAttributedString Dependencies/idevice
+          test "$(git -C source/Dependencies/AltSign rev-parse HEAD)" = "$ALTSIGN_COMMIT"
+          test "$(git -C source/Dependencies/idevice rev-parse HEAD)" = "$IDEVICE_COMMIT"
+          test -f source/Dependencies/idevice/swift/Package.swift
+          cmp source/Podfile.lock source/Pods/Manifest.lock
+          git -C source submodule status --recursive > "$OUT/submodules.txt"
+          git -C source status --porcelain > "$OUT/source-status-before-build.txt"
+          test ! -s "$OUT/source-status-before-build.txt"
+          cp source/Podfile.lock "$OUT/Podfile.lock"
+          cp source/AltStore.xcworkspace/xcshareddata/swiftpm/Package.resolved "$OUT/Package.resolved"
+
+      - name: Resolve the locked Swift packages
+        working-directory: source
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            -workspace AltStore.xcworkspace -scheme AltStore \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/altstore-packages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            2>&1 | tee "$OUT/package-resolution.log"
+
+      - name: Compile the unsigned iPhone app
+        working-directory: source
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace AltStore.xcworkspace -scheme AltStore \            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/altstore-derived" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/altstore-packages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CURRENT_PROJECT_VERSION=73 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= DEVELOPMENT_TEAM= \
+            build 2>&1 | tee "$OUT/build.log"
+
+      - name: Inspect and package the unsigned app
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/altstore-derived/Build/Products/Release-iphoneos/AltStore.app"
+          test -f "$app/Info.plist"
+          mkdir -p "$RUNNER_TEMP/altstore-package/Payload"
+          ditto "$app" "$RUNNER_TEMP/altstore-package/Payload/AltStore.app"
+          cd "$RUNNER_TEMP/altstore-package"
+          ditto -c -k --keepParent Payload "$OUT/AltStore-independent-unsigned.ipa"
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib, zipfile
+          from pathlib import Path
+          out = Path(os.environ['OUT'])
+          ipa = out / 'AltStore-independent-unsigned.ipa'
+          with zipfile.ZipFile(ipa) as archive:
+              assert archive.testzip() is None
+              main = plistlib.loads(archive.read('Payload/AltStore.app/Info.plist'))
+              widget = plistlib.loads(archive.read('Payload/AltStore.app/PlugIns/AltWidgetExtension.appex/Info.plist'))
+              assert main['CFBundleIdentifier'] == 'com.rileytestut.AltStore'
+              assert widget['CFBundleIdentifier'] == 'com.rileytestut.AltStore.AltWidget'
+              assert main['CFBundleVersion'] == widget['CFBundleVersion'] == '73'
+              assert not any(n.endswith(('.p12', '.key', '.mobileprovision')) for n in archive.namelist())
+          manifest = {
+              'source_repository': 'https://github.com/liuzhe1117/AltStore',
+              'source_commit': os.environ['SOURCE_COMMIT'],
+              'altsign_commit': os.environ['ALTSIGN_COMMIT'],
+              'idevice_commit': os.environ['IDEVICE_COMMIT'],
+              'workflow_repository': os.environ['GITHUB_REPOSITORY'],
+              'workflow_commit': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'version': main['CFBundleShortVersionString'],
+              'build': main['CFBundleVersion'],
+              'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest(),
+              'signing_performed': False,
+              'apple_account_credentials_supplied': False,
+          }
+          (out / 'build-manifest.json').write_text(json.dumps(manifest, indent=2))
+          (out / 'SHA256SUMS.txt').write_text(manifest['sha256'] + '  ' + ipa.name + '\n')
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - name: Upload the unsigned app and build evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: AltStore-independent-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.OUT }}/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
