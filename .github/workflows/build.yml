@@ -74,7 +74,8 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild \
-            -workspace AltStore.xcworkspace -scheme AltStore \            -configuration Release -sdk iphoneos \
+            -workspace AltStore.xcworkspace -scheme AltStore \
+            -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/altstore-derived" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/altstore-packages" \
